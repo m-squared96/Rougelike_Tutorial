@@ -398,10 +398,7 @@ fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
 
 fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &mut [Object], fov_recompute: bool) {
     if fov_recompute {
-        let mut player = &mut objects[PLAYER];
-        player.fighter = Some(Fighter {
-            max_hp: 30, hp: 30, defense: 2, power: 5, on_death: DeathCallback::Player,
-        });
+        let player = &objects[PLAYER];
         tcod.fov.compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
     }
 
@@ -501,6 +498,9 @@ fn main() {
 
     let mut player = Object::new(0, 0, '@', WHITE, "player".to_string(), true, true);
     player.alive = true;
+    player.fighter = Some(Fighter {
+        max_hp: 30, hp: 30, defense: 2, power: 5, on_death: DeathCallback::Player,
+    });
 
     let mut objects = vec![player];
 
@@ -524,7 +524,7 @@ fn main() {
         tcod.con.clear();
         
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
-        render_all(&mut tcod, &mut game, &objects, fov_recompute);
+        render_all(&mut tcod, &mut game, &mut objects, fov_recompute);
         tcod.root.flush();
 
         previous_player_position = objects[PLAYER].pos();
