@@ -31,6 +31,9 @@ const FOV_LIGHT_WALLS: bool = true;
 const TORCH_RADIUS: i32 = 10;
 
 const MAX_ROOM_MONSTERS: i32 = 3;
+const MAX_ROOM_ITEMS: i32 = 2;
+
+const HEAL_AMOUNT: i32 = 4;
 
 // GUI constants
 const BAR_WIDTH: i32 = 20;
@@ -40,6 +43,7 @@ const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
 const MSG_X: i32 = BAR_WIDTH + 2;
 const MSG_WIDTH: i32 = SCREEN_WIDTH - BAR_WIDTH - 2;
 const MSG_HEIGHT: usize = PANEL_HEIGHT as usize - 1;
+const INVENTORY_WIDTH: i32 = 50;
 
 struct Tcod {
     root: Root,
@@ -61,13 +65,14 @@ struct Object {
     alive: bool,
     fighter: Option<Fighter>,
     ai: Option<Ai>,
+    item: Option<Item>,
 }
 
 impl Object {
     pub fn new(x: i32, y: i32, char: char, colour: Color, name: String, blocks: bool, alive: bool) -> Self {
         Object { x, y, char, colour, 
             name: name.into(), blocks: blocks, alive: false,
-            fighter: None, ai: None,
+            fighter: None, ai: None, item: None,
         }
     }
 
@@ -119,6 +124,15 @@ impl Object {
                 format!("{} attacks {} without effect", self.name, target.name),
                 WHITE,
             );
+        }
+    }
+
+    pub fn heal(&mut self, amount: i32) {
+        if let Some(ref mut fighter) = self.fighter {
+            fighter.hp += amount;
+            if fighter.hp > fighter.max_hp {
+                fighter.hp = fighter.max_hp;
+            }
         }
     }
 }
@@ -183,6 +197,7 @@ type Map = Vec<Vec<Tile>>;
 struct Game {
     map: Map,
     messages: Messages,
+    inventory: Vec<Object>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +249,11 @@ impl Messages {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Item {
+    Heal,
+}
+
 // PartialEq lets us use == and != to compare enums
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PlayerAction {
@@ -267,6 +287,27 @@ fn player_move_or_attack(dx: i32, dy: i32, game: &mut Game, objects: &mut [Objec
         None => {
             move_by(PLAYER, dx, dy, &game.map, objects);
         }
+    }
+}
+
+fn pick_item_up(object_id: usize, game: &mut Game, objects: &mut Vec<Object>) {
+    // 26 items -> item selection will be controlled using keys A-Z
+    // Alternatives include utilising a "paged" inventory or a more GUI-based approach.
+    // Another limiter could be total weight of items
+    if game.inventory.len() >= 26 {
+        game.messages.add(
+            format!(
+                "Inventory full. {} not picked up.",
+                objects[object_id].name
+            ),
+            RED,
+        )
+    }
+    else {
+        let item = objects.swap_remove(object_id);
+        game.messages
+            .add(format!("{} added to inventory.", item.name), GREEN);
+        game.inventory.push(item);
     }
 }
 
@@ -367,6 +408,21 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
 
             monster.alive = true;
             objects.push(monster);
+        }
+    }
+
+    let num_items = rand::thread_rng().gen_range(0, MAX_ROOM_ITEMS + 1);
+    for _ in 0..num_items {
+        // choose random location for item
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        // only place if tile is not blocked
+        if !is_blocked(x, y, map, objects) {
+            // create a healing potion
+            let mut object = Object::new(x, y, '!', VIOLET, "healing potion".to_string(), false, false);
+            object.item = Some(Item::Heal);
+            objects.push(object);
         }
     }
 }
@@ -543,6 +599,29 @@ fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) -> P
             player_move_or_attack(1, 0, game, objects);
             TookTurn
         },
+        (Key { code: Text, .. }, "g", true) => {
+            // pick up an item
+            let item_id = objects
+                .iter()
+                .position(|object| object.pos() == objects[PLAYER].pos() && object.item.is_some());
+            if let Some(item_id) = item_id {
+                pick_item_up(item_id, game, objects);
+            }
+            DidntTakeTurn
+        },
+        (Key { code: Text, .. }, "i", true) => {
+            // show inventory
+            let inventory_index = 
+                inventory_menu(
+                    &game.inventory, 
+                    "Press the key next to an item to use it, or any other to cancel.\n", 
+                    &mut tcod.root
+                );
+            if let Some(inventory_index) = inventory_index {
+                use_item(inventory_index, tcod, game, objects);
+            }
+            DidntTakeTurn
+        },
 
         _ => DidntTakeTurn
     }
@@ -567,6 +646,94 @@ fn render_bar(panel: &mut Offscreen, x: i32, y: i32, total_width: i32, name: &st
     panel.print_ex(
         x + total_width / 2, y, BackgroundFlag::None, TextAlignment::Center, &format!("{}: {}/{}", name, value, maximum),
     );
+}
+
+fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root) -> Option<usize> {
+    assert!(options.len() <= 26, "Cannot have a menu with more than 26 options");
+
+    let header_height = root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header);
+    let height = options.len() as i32 + header_height;
+
+    let mut window = Offscreen::new(width, height);
+
+    // print the header, with auto-wrap
+    window.set_default_foreground(WHITE);
+    window.print_rect_ex(0, 0, width, height, BackgroundFlag::None, TextAlignment::Left, header,);
+
+    // print options
+    for (index, option_text) in options.iter().enumerate() {
+        let menu_letter = (b'a' + index as u8) as char;
+        let text = format!("({}) {}", menu_letter, option_text.as_ref());
+        window.print_ex(0, header_height + index as i32, BackgroundFlag::None, TextAlignment::Left, text,);
+    }
+
+    let x = SCREEN_WIDTH / 2 - width / 2;
+    let y = SCREEN_HEIGHT / 2 - height / 2;
+    blit(&window, (0, 0), (width, height), root, (x, y), 1.0, 0.7);
+
+    // present root console and wait for keypress
+    root.flush();
+    let key = root.wait_for_keypress(true);
+
+    // convert ASCII -> index; if it corresponds to an option, return it
+    if key.printable.is_alphabetic() {
+        let index = key.printable.to_ascii_lowercase() as usize - 'a' as usize;
+        if index < options.len() { Some(index) } 
+        else { None }
+    }
+    else { None }
+}
+
+enum UseResult { UsedUp, Cancelled, }
+
+fn cast_heal(_inventory_id: usize, _tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) -> UseResult {
+    // heal the player
+    if let Some(fighter) = objects[PLAYER].fighter {
+        if fighter.hp == fighter.max_hp {
+            game.messages.add("You are already at full health", RED);
+            return UseResult::Cancelled;
+        }
+        game.messages
+            .add("Your wounds start to feel better", LIGHT_VIOLET);
+        objects[PLAYER].heal(HEAL_AMOUNT);
+        return UseResult::UsedUp;
+    }
+    UseResult::Cancelled
+}
+
+fn inventory_menu(inventory: &[Object], header: &str, root: &mut Root) -> Option<usize> {
+    // show a menu with each item of the inventory as an option
+    let options = if inventory.len() == 0 {
+        vec!["Inventory is empty".into()]
+    } else {
+        inventory.iter().map(|item| item.name.clone()).collect()
+    };
+
+    let inventory_index = menu(header, &options, INVENTORY_WIDTH, root);
+
+    // if item chosen then return
+    if inventory.len() > 0 { inventory_index }
+    else { None }
+}
+
+fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) {
+    use Item::*;
+
+    if let Some(item) = game.inventory[inventory_id].item {
+        let on_use = match item {
+            Heal => cast_heal,
+        };
+        match on_use(inventory_id, tcod, game, objects) {
+            UseResult::UsedUp => {game.inventory.remove(inventory_id);},
+            UseResult::Cancelled => {game.messages.add("Cancelled", WHITE);},
+        }
+    }
+    else {
+        game.messages.add(
+            format!("The {} cannot be used.", game.inventory[inventory_id].name),
+            WHITE,
+        );
+    }
 }
 
 fn main() {
@@ -600,6 +767,7 @@ fn main() {
     let mut game = Game {
         map: make_map(&mut objects),
         messages: Messages::new(),
+        inventory: vec![],
     };
 
     for y in 0..MAP_HEIGHT {
