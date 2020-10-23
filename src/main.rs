@@ -1,6 +1,12 @@
 use std::cmp;
 use rand::Rng;
 
+use std::error::Error;
+use std::fs::File;
+use std::io::{Read, Write};
+
+use serde::{Deserialize, Serialize};
+
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::map::{FovAlgorithm, Map as FovMap};
@@ -64,7 +70,7 @@ struct Tcod {
     mouse: Mouse,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Object {
     x: i32, 
     y: i32, 
@@ -151,7 +157,7 @@ impl Object {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum DeathCallback {
     Player, Monster,
 }
@@ -168,12 +174,12 @@ impl DeathCallback {
 }
 
 // combat-related properties and methods. 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct Fighter {
     max_hp: i32, hp: i32, defense: i32, power: i32, on_death: DeathCallback,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum Ai {
     Basic,
     Confused {
@@ -185,7 +191,7 @@ enum Ai {
 // #[derive(...)] automatically implements traits (interfaces in other languages)
 // Clone and Copy allow the values to be copied on assignment instead of moving them
 // Debug allows us to print the contents
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Tile {
     blocked: bool,
     explored: bool,
@@ -212,6 +218,7 @@ impl Tile {
 
 type Map = Vec<Vec<Tile>>;
 
+#[derive(Serialize, Deserialize)]
 struct Game {
     map: Map,
     messages: Messages,
@@ -247,6 +254,7 @@ impl Rect {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct Messages {
     messages: Vec<(String, Color)>,
 }   
@@ -267,7 +275,7 @@ impl Messages {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum Item {
     Heal,
     Lightning,
@@ -759,7 +767,11 @@ fn closest_monster(tcod: &Tcod, objects: &[Object], max_range: i32) -> Option<us
 fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root) -> Option<usize> {
     assert!(options.len() <= 26, "Cannot have a menu with more than 26 options");
 
-    let header_height = root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header);
+    let header_height = if header.is_empty() {
+        0
+    } else {
+        root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header)
+    };
     let height = options.len() as i32 + header_height;
 
     let mut window = Offscreen::new(width, height);
@@ -975,25 +987,22 @@ fn drop_item(inventory_id: usize, game: &mut Game, objects: &mut Vec<Object>) {
     objects.push(item);
 }
 
-fn main() {
+fn initialise_fov(tcod: &mut Tcod, map: &Map) {
+    // create FOV map
+    for y in 0..MAP_HEIGHT {
+        for x in 0..MAP_WIDTH {
+            tcod.fov.set(
+                x, y,
+                !map[x as usize][y as usize].block_sight,
+                !map[x as usize][y as usize].blocked,
+            );
+        }
+    }
+    tcod.con.clear();
+}
 
-    tcod::system::set_fps(LIMIT_FPS);
-    
-    let root: Root = Root::initializer()
-        .font("arial10x10.png", FontLayout::Tcod)
-        .font_type(FontType::Greyscale)
-        .size(SCREEN_WIDTH, SCREEN_HEIGHT)
-        .title("Rust/libtcod tutorial")
-        .init();
-
-    let con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
-    let mut tcod = Tcod { root, 
-        con: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
-        panel: Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT),
-        fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
-        key: Default::default(),
-        mouse: Default::default(),
-    };
+fn new_game(tcod: &mut Tcod) -> (Game, Vec<Object>) {
+    // creates player object and initialises FOV
 
     let mut player = Object::new(0, 0, '@', WHITE, "player".to_string(), true, true);
     player.alive = true;
@@ -1009,19 +1018,33 @@ fn main() {
         inventory: vec![],
     };
 
-    for y in 0..MAP_HEIGHT {
-        for x in 0..MAP_WIDTH {
-            tcod.fov.set(
-                x, y,
-                !game.map[x as usize][y as usize].block_sight,
-                !game.map[x as usize][y as usize].blocked,
-            );
-        }
-    }
+    initialise_fov(tcod, &game.map);
 
+    game.messages.add(
+        "Welcome to some deep, dark, smelly dungeon. I don't know, use your imagination and pretend it's Skyrim.",
+        RED,
+    );
+
+    (game, objects)
+}
+
+fn save_game(game: &Game, objects: &[Object]) -> Result<(), Box<dyn Error>> {
+    let save_data = serde_json::to_string(&(game, objects))?;
+    let mut file = File::create("savegame")?;
+    file.write_all(save_data.as_bytes())?;
+    Ok(())
+}
+
+fn load_game() -> Result<(Game, Vec<Object>), Box<dyn Error>> {
+    let mut json_save_state = String::new();
+    let mut file = File::open("savegame")?;
+    file.read_to_string(&mut json_save_state)?;
+    let result = serde_json::from_str::<(Game, Vec<Object>)>(&json_save_state)?;
+    Ok(result)
+}
+
+fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
     let mut previous_player_position = (-1, -1);
-
-    game.messages.add("WELCOME!", RED);
 
     while !tcod.root.window_closed() {
         tcod.con.clear();
@@ -1034,21 +1057,107 @@ fn main() {
         
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
 
-        render_all(&mut tcod, &mut game, &mut objects, fov_recompute);
+        render_all(tcod, game, objects, fov_recompute);
         tcod.root.flush();
 
         previous_player_position = objects[PLAYER].pos();
-        let player_action = handle_keys(&mut tcod, &mut game, &mut objects);
+        let player_action = handle_keys(tcod, game, objects);
         if player_action == PlayerAction::Exit {
+            save_game(game, objects).unwrap();
             break;
         }
 
         if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
             for id in 0..objects.len() {
                 if objects[id].ai.is_some() {
-                    ai_take_turn(id, &tcod, &mut game, &mut objects);
+                    ai_take_turn(id, tcod, game, objects);
                 }
             }
         }
     }
+}
+
+fn msgbox(text: &str, width: i32, root: &mut Root) {
+    let options: &[&str] = &[];
+    menu(text, options, width, root);
+}
+
+fn main_menu(tcod: &mut Tcod) {
+    let img = tcod::image::Image::from_file("menu_background.png")
+        .ok()
+        .expect("Background image not found");
+
+    while !tcod.root.window_closed() {
+        // Show background image at twice usual resolution
+        tcod::image::blit_2x(&img, (0, 0), (-1, -1), &mut tcod.root, (0, 0));
+
+        // Show options and wait for player's choice
+        let choices = &["New Game", "Continue Saved Game", "Quit Game"];
+
+        tcod.root.set_default_foreground(LIGHT_YELLOW);
+        tcod.root.print_ex(
+            SCREEN_WIDTH / 2,
+            SCREEN_HEIGHT / 2 - 4,
+            BackgroundFlag::None,
+            TextAlignment::Center,
+            "Cheap Skyrim, but a roguelike written in Rust",
+        );
+        tcod.root.print_ex(
+            SCREEN_WIDTH / 2,
+            SCREEN_HEIGHT - 2,
+            BackgroundFlag::None,
+            TextAlignment::Center,
+            "By the human formally known as Mikie",
+            
+        );
+
+        let choice = menu("", choices, 24, &mut tcod.root);
+
+        match choice {
+            Some(0) => {
+                let (mut game, mut objects) = new_game(tcod);
+                play_game(tcod, &mut game, &mut objects);
+            }
+            Some(1) => {
+
+                match load_game() {
+                    Ok((mut game, mut objects)) => {
+                        initialise_fov(tcod, &game.map);
+                        play_game(tcod, &mut game, &mut objects);
+                    }
+                    Err(_e) => {
+                        msgbox("\nNo saved game to load.\n", 24, &mut tcod.root);
+                        continue;
+                    }
+                }
+            }
+            Some(2) => {
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn main() {
+
+    tcod::system::set_fps(LIMIT_FPS);
+    
+    let root: Root = Root::initializer()
+        .font("arial10x10.png", FontLayout::Tcod)
+        .font_type(FontType::Greyscale)
+        .size(SCREEN_WIDTH, SCREEN_HEIGHT)
+        .title("Rust/libtcod tutorial")
+        .init();
+
+    let mut tcod = Tcod { root, 
+        con: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
+        panel: Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT),
+        fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
+        key: Default::default(),
+        mouse: Default::default(),
+    };
+
+    main_menu(&mut tcod);
+
 }
